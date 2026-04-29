@@ -198,7 +198,9 @@ def load_checkpoint(
     Returns:
         保存时的训练步数（用于继续学习率调度）
     """
-    checkpoint = torch.load(src, weights_only=True)
+    # map_location="cpu" allows loading GPU-saved checkpoints on CPU-only machines;
+    # load_state_dict will then move tensors to wherever the model/optimizer already live.
+    checkpoint = torch.load(src, weights_only=True, map_location="cpu")
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     return checkpoint["iteration"]
