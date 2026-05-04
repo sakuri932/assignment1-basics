@@ -37,13 +37,14 @@ def _find_chunk_boundaries(
     确保每个 chunk 的边界都落在特殊 token 的起始位置，
     这样并行预分词时不会在文档中间截断。
     """
+    # 1.按特殊 token 分割文本块（粒度：多个短篇故事），防止 BPE 跨文档边界合并
     file.seek(0, os.SEEK_END)
     file_size = file.tell()
     file.seek(0)
 
     chunk_size = file_size // desired_num_chunks
-    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
-    chunk_boundaries[-1] = file_size
+    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)] #给出初始化文本块分割
+    chunk_boundaries[-1] = file_size #读取文件末尾，用于修正最后一个块的边界
 
     mini_chunk_size = 4096  # 每次向前查找 4KB
     for bi in range(1, len(chunk_boundaries) - 1):
@@ -82,11 +83,12 @@ def _pretokenize_chunk(args: tuple) -> dict:
 
     chunk = raw_bytes.decode("utf-8", errors="ignore")
 
-    # 按特殊 token 分割，防止 BPE 跨文档边界合并
+    # 2.按特殊 token 分割文本块（粒度：单个短篇故事），防止 BPE 跨文档边界合并
     if special_tokens:
+        #正则表达式特殊 token 用escape转义，按长度降序确保最长匹配优先，这样不会匹配出错从而报错
         escaped = [re.escape(st) for st in sorted(special_tokens, key=len, reverse=True)]
         split_pat = "|".join(escaped)
-        # split 保留分隔符（特殊 token）在结果中
+        # split 保留分隔符（特殊 token）在结果中，并切割文本
         parts = re.split(f"({split_pat})", chunk)
     else:
         parts = [chunk]
@@ -94,6 +96,7 @@ def _pretokenize_chunk(args: tuple) -> dict:
     pretoken_counts: dict[tuple, int] = defaultdict(int)
     special_tokens_set = set(special_tokens) if special_tokens else set()
 
+    #3.对每篇小故事，按特殊 token 分割文本块（粒度：故事的每个单词）为pre-token，统计 pre-token 频次
     for part in parts:
         if not part:
             continue
@@ -101,8 +104,9 @@ def _pretokenize_chunk(args: tuple) -> dict:
         if part in special_tokens_set:
             continue
         # 使用 GPT-2 正则进行预分词
+        #regex.finditer(pattern, string) 会在 string 里从左到右扫描，找出所有匹配 pattern 的地方，返回一个迭代器，每次产出一个匹配对象 match。
         for match in regex.finditer(PAT, part):
-            word = match.group(0)
+            word = match.group(0) #group(0) 表示匹配到的pre-token，如 "hello"
             # 将每个字符的 UTF-8 编码拆为单独字节
             word_bytes_tuple = tuple(bytes([b]) for b in word.encode("utf-8"))
             pretoken_counts[word_bytes_tuple] += 1
@@ -172,25 +176,26 @@ def train_bpe(
 
     pretoken_counts: dict[tuple, int] = defaultdict(int)
 
+    #多进程设置
     if len(chunk_args) > 1:
         with multiprocessing.Pool(num_processes) as pool:
             results = pool.map(_pretokenize_chunk, chunk_args)
     else:
         results = [_pretokenize_chunk(a) for a in chunk_args]
-
+    #多进程结果合并为总字典
     for result in results:
         for word_tuple, count in result.items():
             pretoken_counts[word_tuple] += count
 
     # --- Step 3: BPE 合并循环 ---
-    # words: word_id -> (可变字节列表, 频次)
+    # words: word_id -> (可变字节列表, 频次)，目的是转换“单词表”字典为更好的结构，以便增量更新
     words: dict[int, tuple[list[bytes], int]] = {
         i: (list(word_tuple), count)
         for i, (word_tuple, count) in enumerate(pretoken_counts.items())
     }
 
     # pair_counts: (a, b) -> 在所有词中出现的总次数
-    pair_counts: dict[tuple[bytes, bytes], int] = defaultdict(int)
+    pair_counts: dict[tuple[bytes, bytes], int] = defaultdict(int) #收集最终相邻对数量
     # pair_to_words: (a, b) -> 包含该对的 word ID 集合（用于增量更新）
     pair_to_words: dict[tuple[bytes, bytes], set[int]] = defaultdict(set)
 
@@ -198,16 +203,19 @@ def train_bpe(
     for word_id, (tokens, count) in words.items():
         for i in range(len(tokens) - 1):
             pair = (tokens[i], tokens[i + 1])
-            pair_counts[pair] += count
-            pair_to_words[pair].add(word_id)
+            pair_counts[pair] += count #双for扫描加和包含该对的词频总和
+            pair_to_words[pair].add(word_id) #双for记录包含该对的词ID集合
 
     merges: list[tuple[bytes, bytes]] = []
 
+    #根据对频次合并单词文本集
     for _ in range(num_merges):
         if not pair_counts:
             break
 
         # 选出最高频对；频率相同时取字典序最大的（确定性行为）
+        #对于每个字节对 p，用 (pair_counts[p], p) 这个元组来比较大小。
+        # Python 比较元组时，先比第一个元素，第一个相同再比第二个。所以这相当于：先按频次排，频次一样就按字节对本身的字典序排。
         best_pair = max(pair_counts, key=lambda p: (pair_counts[p], p))
 
         if pair_counts[best_pair] <= 0:
@@ -225,6 +233,7 @@ def train_bpe(
         for word_id in affected_words:
             tokens, count = words[word_id]
 
+            #这个单词不存在了，成了一个新单词，所以它对所有相邻对的贡献都要减去，然后再加上新单词对的贡献
             # 先从 pair_counts 中减去该词对所有对的贡献
             for i in range(len(tokens) - 1):
                 pair = (tokens[i], tokens[i + 1])
@@ -269,6 +278,8 @@ def _gpt2_bytes_to_unicode() -> dict[int, str]:
     GPT-2 用可打印 Unicode 字符表示所有 256 个字节值，
     以便在 JSON 中存储词表而不引入控制字符。
     """
+    # bpe编码器核心部分编解码对特殊符号使用正常编解码，然而文本存储时无法存储特殊符号，这里是将特殊符号映射为可打印字符
+    # 比如空格、换行等特殊符号，剩下的字节值则直接映射为对应的 Unicode 字符，这样保存词表时就能保存为txt等格式。
     bs = (
         list(range(ord("!"), ord("~") + 1))
         + list(range(ord("¡"), ord("¬") + 1))
@@ -318,6 +329,7 @@ class Tokenizer:
 
         # 构建反向查找: 字节串 -> token ID
         self.bytes_to_id: dict[bytes, int] = {v: k for k, v in self.vocab.items()}
+        #注：这说明总共有三个表，一个是vocab，一个是merges，最后一个是bytes_to_id
 
         # 将不在词表中的特殊 token 追加到词表末尾
         for token in self.special_tokens:
@@ -369,7 +381,7 @@ class Tokenizer:
         vocab = {
             int(v): bytes([gpt2_byte_decoder[c] for c in k])
             for k, v in gpt2_vocab.items()
-        }
+        } # 注意这里的bytes能直接把list合成回一个单独的字节串而不是一个字节列表，这样就能正确构建vocab表了
 
         with open(merges_filepath, encoding="utf-8") as f:
             lines = f.readlines()
