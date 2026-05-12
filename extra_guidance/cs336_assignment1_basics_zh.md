@@ -504,6 +504,8 @@ Norm → 位置前馈网络
 
 **图 2**：前置归一化（pre-norm）Transformer 块。
 
+<img src="./cs336_assignment1_basics_zh.assets/image-20260505174143177.png" alt="image-20260505174143177" style="zoom:50%;" />
+
 #### Token 嵌入
 
 第一步，Transformer 将（批量）token ID 序列嵌入为包含 token 身份信息的向量序列（图 1 中的红色块）。
@@ -792,19 +794,28 @@ $$\text{RMSNorm}(a_i) = \frac{a_i}{\text{RMS}(a)} g_i, \tag{4}$$
 
 SiLU 或 Swish 激活函数 [D. Hendrycks 等, 2016; S. Elfwing 等, 2017] 定义如下：
 
-$$\text{SiLU}(x) = x \cdot \sigma(x) = \frac{x}{1 + e^{-x}} \tag{5}$$
+$$
+\text{SiLU}(x) = x \cdot \sigma(x) = \frac{x}{1 + e^{-x}} \tag{5}
+$$
+<img src="./cs336_assignment1_basics_zh.assets/image-20260505175049137.png" alt="image-20260505175049137" style="zoom:50%;" />
 
 如图 3 所示，SiLU 激活函数类似于 ReLU 激活函数，但在零处是光滑的。
 
 门控线性单元（GLU）最初由 Y. N. Dauphin 等 [19] 定义为通过 sigmoid 函数的线性变换与另一个线性变换的逐元素乘积：
 
-$$\text{GLU}(x, W_1, W_2) = \sigma(W_1 x) \odot W_2 x, \tag{6}$$
+$$
+\text{GLU}(x, W_1, W_2) = \sigma(W_1 x) \odot W_2 x, \tag{6}
+$$
+
 
 其中 $\odot$ 表示逐元素乘法。门控线性单元被建议"通过为梯度提供线性路径同时保留非线性能力来减少深层架构的梯度消失问题"。
 
 将 SiLU/Swish 和 GLU 结合起来，我们得到 SwiGLU，用于我们的前馈网络：
 
-$$\text{FFN}(x) = \text{SwiGLU}(x, W_1, W_2, W_3) = W_2(\text{SiLU}(W_1 x) \odot W_3 x), \tag{7}$$
+$$
+\text{FFN}(x) = \text{SwiGLU}(x, W_1, W_2, W_3) = W_2(\text{SiLU}(W_1 x) \odot W_3 x), \tag{7}
+$$
+
 
 其中 $x \in \mathbb{R}^{d_\text{model}}$，$W_1, W_3 \in \mathbb{R}^{d_\text{ff} \times d_\text{model}}$，$W_2 \in \mathbb{R}^{d_\text{model} \times d_\text{ff}}$，规范上 $d_\text{ff} = \frac{8}{3} d_\text{model}$。对于具体实现，可以将其四舍五入到最近的 64 的倍数以提高硬件效率。
 
@@ -914,7 +925,7 @@ $$\text{MultiHeadSelfAttention}(x) = W^O \text{MultiHead}(W^Q x, W^K x, W^V x) \
 
 **应用 RoPE**
 
-RoPE 应应用于查询和键向量，但不应用于值向量。此外，头维度应作为批处理维度处理，因为在多头注意力中，注意力对每个头独立应用。这意味着完全相同的 RoPE 旋转应应用于每个头的查询和键向量。
+RoPE 应应用于查询Q和键K向量，但不应用于值V向量。此外，头维度应作为批处理维度处理，因为在多头注意力中，注意力对每个头独立应用。这意味着完全相同的 RoPE 旋转应应用于每个头的查询和键向量。
 
 > ⁵ 作为进阶目标，尝试将键、查询和值投影合并为单个权重矩阵，使你只需要一次矩阵乘法。
 
@@ -935,9 +946,14 @@ RoPE 应应用于查询和键向量，但不应用于值向量。此外，头维
 
 让我们开始组装 Transformer 块（参考图 2 会有帮助）。Transformer 块包含两个"子层"，一个用于多头自注意力，另一个用于 SwiGLU 前馈网络。在每个子层中，我们首先执行 RMSNorm，然后是主要操作（MHA/FF），最后添加残差连接。
 
+<img src="./cs336_assignment1_basics_zh.assets/image-20260505174122568.png" alt="image-20260505174122568" style="zoom:50%;" />
+
 具体来说，Transformer 块的第一半（第一个"子层"）应实现以下更新，从输入 $x$ 产生输出 $y$：
 
-$$y = x + \text{MultiHeadSelfAttention}(\text{RMSNorm}(x)). \tag{15}$$
+$$
+y = x + \text{MultiHeadSelfAttention}(\text{RMSNorm}(x)). \tag{15}
+$$
+
 
 ---
 
@@ -1037,13 +1053,19 @@ $$y = x + \text{MultiHeadSelfAttention}(\text{RMSNorm}(x)). \tag{15}$$
 
 回想一下，Transformer 语言模型为长度为 $m+1$ 的每个序列 $x$ 和 $i = 1, \ldots, m$ 定义了分布 $p_\theta(x_{i+1} | x_{1:i})$。给定由长度为 $m+1$ 的序列组成的训练集 $\mathcal{D}$，我们定义标准交叉熵（负对数似然）损失函数：
 
-$$\ell(\theta; \mathcal{D}) = \frac{1}{|\mathcal{D}|m} \sum_{x \in \mathcal{D}} \sum_{i=1}^{m} -\log p_\theta(x_{i+1} | x_{1:i}). \tag{16}$$
+$$
+\ell(\theta; \mathcal{D}) = \frac{1}{|\mathcal{D}|m} \sum_{x \in \mathcal{D}} \sum_{i=1}^{m} -\log p_\theta(x_{i+1} | x_{1:i}). \tag{16}
+$$
+
 
 （注意，Transformer 中的单次前向传播对所有 $i = 1, \ldots, m$ 均可得到 $p_\theta(x_{i+1} | x_{1:i})$。）
 
 特别地，Transformer 为每个位置 $i$ 计算 logit $o_i \in \mathbb{R}^\text{vocab\_size}$，从而：⁶
 
-$$p(x_{i+1} | x_{1:i}) = \text{softmax}(o_i)[x_{i+1}] = \frac{\exp(o_i[x_{i+1}])}{\sum_{a=1}^{\text{vocab\_size}} \exp(o_i[a])}. \tag{17}$$
+$$
+p(x_{i+1} | x_{1:i}) = \text{softmax}(o_i)[x_{i+1}] = \frac{\exp(o_i[x_{i+1}])}{\sum_{a=1}^{\text{vocab\_size}} \exp(o_i[a])}. \tag{17}
+$$
+
 
 交叉熵损失通常针对 logit 向量 $o_i \in \mathbb{R}^\text{vocab\_size}$ 和目标 $x_{i+1}$ 定义。⁷
 
@@ -1351,9 +1373,14 @@ end for
 
 具体地，解码过程的一步应接受序列 $x_{1\ldots t}$ 并通过以下方程返回 token $x_{t+1}$：
 
-$$P(x_{t+1} = i | x_{1\ldots t}) = \frac{\exp(v_i)}{\sum_j \exp(v_j)} \tag{21}$$
+$$
+P(x_{t+1} = i | x_{1\ldots t}) = \frac{\exp(v_i)}{\sum_j \exp(v_j)} \tag{21}
+$$
 
-$$v = \text{TransformerLM}(x_{1\ldots t})_t \in \mathbb{R}^\text{vocab\_size} \tag{22}$$
+$$
+v = \text{TransformerLM}(x_{1\ldots t})_t \in \mathbb{R}^\text{vocab\_size} \tag{22}
+$$
+
 
 其中 $\text{TransformerLM}$ 是我们的模型，接受长度为 `sequence_length` 的序列作为输入，生成大小为 `(sequence_length, vocab_size)` 的矩阵，我们取该矩阵的最后一个元素，因为我们寻找第 $t$ 个位置的下一 token 预测。
 
@@ -1363,13 +1390,19 @@ $$v = \text{TransformerLM}(x_{1\ldots t})_t \in \mathbb{R}^\text{vocab\_size} \t
 
 我们将在小型模型上进行实验，小型模型有时会生成质量很低的文本。两个简单的解码技巧可以帮助解决这些问题。首先，在**温度缩放**中，我们用温度参数 $\tau$ 修改 softmax，新的 softmax 为：
 
-$$\text{softmax}(v, \tau)_i = \frac{\exp(v_i / \tau)}{\sum_{j=1}^{\text{vocab\_size}} \exp(v_j / \tau)}. \tag{23}$$
+$$
+\text{softmax}(v, \tau)_i = \frac{\exp(v_i / \tau)}{\sum_{j=1}^{\text{vocab\_size}} \exp(v_j / \tau)}. \tag{23}
+$$
+
 
 注意，设置 $\tau \to 0$ 使得 $v$ 的最大元素占主导，softmax 的输出变为集中在该最大元素处的独热向量。
 
 其次，另一个技巧是**核采样**（nucleus）或 top-p 采样，我们通过截断低概率 token 来修改采样分布。设 $q$ 是从（温度缩放的）softmax 得到的大小为 `vocab_size` 的概率分布。核采样（超参数为 $p$）按以下方程生成下一个 token：
 
-$$P(x_{t+1} = i | q) = \begin{cases} \frac{q_i}{\sum_{j \in V(p)} q_j} & \text{若 } i \in V(p) \\ 0 & \text{否则} \end{cases} \tag{24}$$
+$$
+P(x_{t+1} = i | q) = \begin{cases} \frac{q_i}{\sum_{j \in V(p)} q_j} & \text{若 } i \in V(p) \\ 0 & \text{否则} \end{cases} \tag{24}
+$$
+
 
 其中 $V(p)$ 是最小的索引集合，使得 $\sum_{j \in V(p)} q_j \geq p$。你可以通过首先按大小对概率分布 $q$ 排序，然后选择最大的词汇表元素直到达到目标水平 $p$ 来轻松计算这个量。
 

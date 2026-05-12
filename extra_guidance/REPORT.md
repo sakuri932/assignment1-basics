@@ -265,6 +265,7 @@ Attention(Q, K, V) = softmax(QK^T / √d_k) V
 实现：使用下三角布尔矩阵，False 位置的注意力分数填充 -∞，经 softmax 后权重变为 0。
 
 **数值稳定的 softmax**：
+
 ```python
 # log-sum-exp trick
 scores_max = scores.max(dim=-1, keepdim=True).values
@@ -337,6 +338,8 @@ GPT-2 XL 配置：
 | 每层 RMSNorm (×2) | 2 × d_model = **3200** |
 | 最终 RMSNorm | d_model = **1600** |
 | LM Head | vocab_size × d_model ≈ **80M** |
+
+其中O是多头混合线性层
 
 每层参数：~30.84M
 总参数 = 80M + 48 × 30.84M + 1600 + 80M ≈ **1.64B 参数**

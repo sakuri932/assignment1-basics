@@ -196,7 +196,7 @@ class TransformerLM(nn.Module):
         # 最终归一化层（前归一化架构在最后需要额外一个 RMSNorm）
         self.ln_final = RMSNorm(d_model, device=device, dtype=dtype)
 
-        # LM 头：将 d_model 投影到 vocab_size 维 logits（无偏置）
+        # LM 头：将 d_model 投影到 vocab_size 维 logits（无偏置，也就是没有Ax+b没有b只有Ax）
         # 注意：不共享嵌入权重（与原始 GPT-2 不同，为简化实现）
         self.lm_head = Linear(d_model, vocab_size, device=device, dtype=dtype)
 

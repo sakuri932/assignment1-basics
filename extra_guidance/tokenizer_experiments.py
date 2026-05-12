@@ -34,6 +34,7 @@ def load_or_train_tokenizer(
     vocab_size: int,
     vocab_save: Path,
     merges_save: Path,
+    max_workers: int | None = None,
 ) -> Tokenizer:
     """
     如果已保存的词表文件存在则直接加载，否则训练并保存。
@@ -57,6 +58,7 @@ def load_or_train_tokenizer(
         input_path=train_path,
         vocab_size=vocab_size,
         special_tokens=SPECIAL_TOKENS,
+        max_workers=max_workers,
     )
     print(f"  训练完成，耗时 {time.time() - t0:.1f}s")
 
@@ -105,12 +107,17 @@ def main():
         vocab_size=10_000,
         vocab_save=DATA_DIR / "tinystories_vocab.json",
         merges_save=DATA_DIR / "tinystories_merges.txt",
+        # TinyStories 只有 2.1GB，全核并发没问题，不传 max_workers 走默认值
     )
     tok_owt = load_or_train_tokenizer(
         train_path=DATA_DIR / "owt_train.txt",
         vocab_size=32_000,
         vocab_save=DATA_DIR / "owt_vocab.json",
         merges_save=DATA_DIR / "owt_merges.txt",
+        # OWT 有 11GB，全核并发会同时占用 N×2GB 内存导致 OOM。
+        # 原来在 16GB 本机上限制为 2 个工作进程，峰值内存约 2×2GB=4GB。
+        # max_workers=2,
+        # 服务器内存 128GB，解除限制，让 train_bpe 按 CPU 核数自动决定并发数。
     )
 
     # ─────────────────────────────────────────

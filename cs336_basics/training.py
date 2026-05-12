@@ -24,6 +24,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from typing import IO, BinaryIO
+from tqdm import tqdm
 
 
 def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
@@ -82,17 +83,17 @@ def cross_entropy_loss(
     """
     # 减去每行最大值（数值稳定）
     inputs_max = inputs.max(dim=-1, keepdim=True).values
-    inputs_shifted = inputs - inputs_max  # (batch, vocab_size)
+    inputs_shifted = inputs - inputs_max  # (batch, seq_length, vocab_size)
 
     # log-sum-exp: log Σ exp(x_i - max)
-    log_sum_exp = torch.log(torch.exp(inputs_shifted).sum(dim=-1))  # (batch,)
+    log_sum_exp = torch.log(torch.exp(inputs_shifted).sum(dim=-1))  # (batch, seq_length)
 
     # 目标类别的 logit（已减去 max）
     # gather: 按 targets 索引取对应位置的 logit
-    target_logits = inputs_shifted.gather(-1, targets.unsqueeze(-1)).squeeze(-1)  # (batch,)
+    target_logits = inputs_shifted.gather(-1, targets.unsqueeze(-1)).squeeze(-1)  # (batch, seq_length)
 
     # 交叉熵 = -目标 logit + log-sum-exp
-    per_sample_loss = log_sum_exp - target_logits  # (batch,)
+    per_sample_loss = log_sum_exp - target_logits  # (batch, seq_length)
 
     # 返回批次平均损失
     return per_sample_loss.mean()
@@ -138,7 +139,7 @@ def get_batch(
     x_list = []
     y_list = []
     for s in starts:
-        s = s.item()
+        s = s.item() # numpy 的切片 dataset[a:b] 期望 a 和 b 是 Python int，但 s 是一个 PyTorch tensor 对象，因此需要调用 .item() 将其转换为 Python int。
         x_list.append(torch.tensor(dataset[s : s + context_length].astype(np.int64), dtype=torch.long))
         y_list.append(torch.tensor(dataset[s + 1 : s + context_length + 1].astype(np.int64), dtype=torch.long))
 
@@ -265,14 +266,14 @@ def decode_text(
 
             # 前向传播：取最后一位置的 logits
             logits = model(token_ids)  # (1, seq_len, vocab_size)
-            next_token_logits = logits[0, -1, :]  # (vocab_size,)
+            next_token_logits = logits[0, -1, :]  # (vocab_size,)，意思是取最后一个seq_len位置的全部logits
 
             # 温度缩放
             if temperature != 1.0:
                 next_token_logits = next_token_logits / temperature
 
             # 转为概率
-            probs = softmax(next_token_logits, dim=0)
+            probs = softmax(next_token_logits, dim=0) # softmax需要指定dim位置，由于只有一个维度，因此写dim=0
 
             # Top-p（nucleus）采样
             if top_p is not None and top_p < 1.0:
@@ -324,6 +325,7 @@ def train(
     max_grad_norm: float = 1.0,
     start_iter: int = 0,
     log_file: str | None = None,
+    wandb_run=None,
 ) -> None:
     """
     完整的训练循环。
@@ -369,7 +371,16 @@ def train(
     log_data = []  # 记录训练曲线
     start_time = time.time()
 
-    for it in range(start_iter + 1, max_iters + 1):
+    pbar = tqdm(
+        range(start_iter + 1, max_iters + 1),
+        initial=start_iter,
+        total=max_iters,
+        desc="Training",
+        unit="step",
+        dynamic_ncols=True,
+    )
+
+    for it in pbar:
         # --- 设置学习率 ---
         lr = get_lr_cosine_schedule(
             it=it,
@@ -412,11 +423,13 @@ def train(
             "elapsed": elapsed,
         }
 
+        # 更新进度条后缀
+        pbar.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{lr:.2e}"})
+
         # --- 定期验证 ---
         if val_dataset is not None and it % eval_interval == 0:
             model.eval()
             with torch.no_grad():
-                # 用多批次估计验证 loss
                 val_losses = []
                 for _ in range(10):
                     vx, vy = get_batch(val_dataset, batch_size, context_length, device)
@@ -432,14 +445,19 @@ def train(
 
             log_entry["val_loss"] = val_loss
             log_entry["val_ppl"] = val_ppl
-            print(
+            tqdm.write(
                 f"Step {it:6d} | lr={lr:.2e} | train_loss={loss.item():.4f} "
                 f"| val_loss={val_loss:.4f} | val_ppl={val_ppl:.2f} | t={elapsed:.1f}s"
             )
-        elif it % max(1, eval_interval // 10) == 0:
-            print(
-                f"Step {it:6d} | lr={lr:.2e} | train_loss={loss.item():.4f} | t={elapsed:.1f}s"
-            )
+            if wandb_run is not None:
+                wandb_run.log(
+                    {"train_loss": loss.item(), "val_loss": val_loss,
+                     "val_ppl": val_ppl, "lr": lr},
+                    step=it,
+                )
+        else:
+            if wandb_run is not None:
+                wandb_run.log({"train_loss": loss.item(), "lr": lr}, step=it)
 
         log_data.append(log_entry)
 
@@ -447,7 +465,9 @@ def train(
         if checkpoint_dir and it % checkpoint_interval == 0:
             ckpt_path = os.path.join(checkpoint_dir, f"checkpoint_{it:07d}.pt")
             save_checkpoint(model, optimizer, it, ckpt_path)
-            print(f"  → Checkpoint saved: {ckpt_path}")
+            tqdm.write(f"  → Checkpoint saved: {ckpt_path}")
+
+    pbar.close()
 
     # 保存训练日志
     if log_file:

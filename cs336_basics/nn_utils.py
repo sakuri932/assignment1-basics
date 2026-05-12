@@ -318,7 +318,7 @@ class RotaryPositionalEmbedding(nn.Module):
 
         # 将旋转后的偶数和奇数维度重新交错拼合
         # stack → (..., seq_len, d_k/2, 2)，reshape → (..., seq_len, d_k)
-        x_rotated = torch.stack([x_rot_even, x_rot_odd], dim=-1)
+        x_rotated = torch.stack([x_rot_even, x_rot_odd], dim=-1) # 对于每个位置k，把 even[k] 和 odd[k] 配成一对,在最后一维之后插入新维度
         return x_rotated.flatten(-2)  # 展平最后两个维度
 
 
@@ -344,6 +344,7 @@ def scaled_dot_product_attention(
         Q: Query 张量，形状为 (..., queries, d_k)
         K: Key 张量，形状为 (..., keys, d_k)
         V: Value 张量，形状为 (..., keys, d_v)
+        在这里，d_k = d_v，因为这里是自注意力，但函数设计为通用，可以处理不同维度的 K 和 V。
         mask: 可选布尔掩码，形状为 (..., queries, keys)
               True=允许关注，False=屏蔽（设为 -∞）
 
@@ -353,6 +354,7 @@ def scaled_dot_product_attention(
     d_k = Q.shape[-1]
 
     # 计算注意力分数: Q @ K^T / √d_k，形状 (..., queries, keys)
+    # 这和 Q @ K.transpose(-2, -1) 完全等价，只是 einsum 的写法更清晰地表达了"对哪个维度做内积"。
     scores = einsum(Q, K, "... q d, ... k d -> ... q k") / math.sqrt(d_k)
 
     # 应用掩码：False 位置填充 -∞（softmax 后权重为 0）
@@ -457,6 +459,7 @@ class MultiHeadSelfAttention(nn.Module):
             token_positions = torch.arange(seq_len, device=x.device)
 
         # 计算 Q, K, V 投影: (..., seq_len, d_model)
+        # 值得注意的是，只有这里用了合并的方式计算 Q/K/V，后续通过 rearrange 拆分为多头就没有合并计算了
         Q = self.q_proj(x)
         K = self.k_proj(x)
         V = self.v_proj(x)

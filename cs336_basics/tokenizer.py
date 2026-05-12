@@ -22,11 +22,23 @@ import regex
 import multiprocessing
 from collections import defaultdict
 from typing import Any, Iterator, Iterable
+from tqdm import tqdm
 
-# GPT-2 风格的预分词正则表达式
-# 该模式将文本分割为"词"，BPE 不会跨越这些边界合并
+# GPT-2 风格的预分词正则表达式，扩展支持中日韩文字
+# 规则说明：
+#   1. 汉字（简/繁）、平假名、片假名、韩文音节：每个字符单独成一个 word 单元
+#   2. \p{L} 改用集合差集排除 CJK，避免"GPT模型"被误合并为一整个单元
+#   3. 英文分支行为与原 GPT-2 完全一致
 # 来源: github.com/openai/tiktoken/pull/234/files
-PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+_CJK = r"\p{Han}|\p{Hiragana}|\p{Katakana}|\p{Hangul}"
+PAT = (
+    rf"(?:{_CJK})"                                                      # 中/日/韩：单字符
+    r"|'(?:[sdmt]|ll|ve|re)"                                            # 英文缩写
+    r"| ?[\p{L}--\p{Han}--\p{Hiragana}--\p{Katakana}--\p{Hangul}]+"   # 非 CJK 字母序列
+    r"| ?\p{N}+"                                                        # 数字序列
+    r"| ?[^\s\p{L}\p{N}]+"                                             # 标点/符号
+    r"|\s+(?!\S)|\s+"                                                   # 空白
+)
 
 
 def _find_chunk_boundaries(
@@ -105,7 +117,7 @@ def _pretokenize_chunk(args: tuple) -> dict:
             continue
         # 使用 GPT-2 正则进行预分词
         #regex.finditer(pattern, string) 会在 string 里从左到右扫描，找出所有匹配 pattern 的地方，返回一个迭代器，每次产出一个匹配对象 match。
-        for match in regex.finditer(PAT, part):
+        for match in regex.finditer(PAT, part, regex.VERSION1):
             word = match.group(0) #group(0) 表示匹配到的pre-token，如 "hello"
             # 将每个字符的 UTF-8 编码拆为单独字节
             word_bytes_tuple = tuple(bytes([b]) for b in word.encode("utf-8"))
@@ -118,6 +130,7 @@ def train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
     special_tokens: list[str],
+    max_workers: int | None = None,
     **kwargs,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """
@@ -165,8 +178,14 @@ def train_bpe(
     split_token = special_tokens[0].encode("utf-8") if special_tokens else b"\n"
     num_processes = max(1, multiprocessing.cpu_count())
 
+    # max_workers 限制实际并发数，默认使用全部 CPU 核心。
+    # 对 OWT（11GB）等大文件，pool.map 会同时启动 N 个工作进程，
+    # 每个进程各占约 1-2GB 内存，N 核机器峰值超过 16GB 直接 OOM。
+    # 传入较小的 max_workers（如 2）可把并发进程数压低，控制内存峰值。
+    actual_workers = min(num_processes, max_workers) if max_workers is not None else num_processes
+
     with open(input_path, "rb") as f:
-        boundaries = _find_chunk_boundaries(f, num_processes, split_token)
+        boundaries = _find_chunk_boundaries(f, actual_workers, split_token)
 
     chunk_args = [
         (str(input_path), boundaries[i], boundaries[i + 1], special_tokens)
@@ -176,14 +195,31 @@ def train_bpe(
 
     pretoken_counts: dict[tuple, int] = defaultdict(int)
 
-    #多进程设置
+    # 原来的写法：pool.map 等所有工作进程全部完成后，把结果列表一次性返回主进程，
+    # 导致所有 chunk 的词频表同时驻留内存，大文件时内存爆炸。
+    # if len(chunk_args) > 1:
+    #     with multiprocessing.Pool(num_processes) as pool:
+    #         results = pool.map(_pretokenize_chunk, chunk_args)
+    # else:
+    #     results = [_pretokenize_chunk(a) for a in chunk_args]
+    # for result in results:
+    #     for word_tuple, count in result.items():
+    #         pretoken_counts[word_tuple] += count
+
+    # 新写法：改用 pool.imap，主进程每次只取回一个工作进程的结果，
+    # 合并进总表后立即释放，任意时刻内存里只有「总表 + 当前一个 chunk 的结果」。
     if len(chunk_args) > 1:
-        with multiprocessing.Pool(num_processes) as pool:
-            results = pool.map(_pretokenize_chunk, chunk_args)
+        with multiprocessing.Pool(actual_workers) as pool:
+            for result in tqdm(
+                pool.imap(_pretokenize_chunk, chunk_args, chunksize=1),
+                total=len(chunk_args),
+                desc="预分词",
+                unit="chunk",
+            ):
+                for word_tuple, count in result.items():
+                    pretoken_counts[word_tuple] += count
     else:
-        results = [_pretokenize_chunk(a) for a in chunk_args]
-    #多进程结果合并为总字典
-    for result in results:
+        result = _pretokenize_chunk(chunk_args[0])
         for word_tuple, count in result.items():
             pretoken_counts[word_tuple] += count
 
@@ -209,13 +245,11 @@ def train_bpe(
     merges: list[tuple[bytes, bytes]] = []
 
     #根据对频次合并单词文本集
+    pbar = tqdm(total=num_merges, desc="BPE 合并", unit="merge")
     for _ in range(num_merges):
         if not pair_counts:
             break
 
-        # 选出最高频对；频率相同时取字典序最大的（确定性行为）
-        #对于每个字节对 p，用 (pair_counts[p], p) 这个元组来比较大小。
-        # Python 比较元组时，先比第一个元素，第一个相同再比第二个。所以这相当于：先按频次排，频次一样就按字节对本身的字典序排。
         best_pair = max(pair_counts, key=lambda p: (pair_counts[p], p))
 
         if pair_counts[best_pair] <= 0:
@@ -226,6 +260,8 @@ def train_bpe(
         merges.append(best_pair)
         vocab[idx] = merged
         idx += 1
+        pbar.set_postfix({"pair": f"{best_pair[0].decode('latin-1')}+{best_pair[1].decode('latin-1')}", "freq": pair_counts[best_pair]})
+        pbar.update(1)
 
         # 对所有包含 best_pair 的词进行增量更新
         affected_words = list(pair_to_words.get(best_pair, set()))
@@ -269,6 +305,7 @@ def train_bpe(
         if best_pair in pair_to_words:
             del pair_to_words[best_pair]
 
+    pbar.close()
     return vocab, merges
 
 
@@ -528,7 +565,7 @@ class Tokenizer:
                 token_ids.append(token_id)
             else:
                 # 普通文本：预分词 + BPE
-                for match in regex.finditer(PAT, part):
+                for match in regex.finditer(PAT, part, regex.VERSION1):
                     word = match.group(0)
                     word_bytes = [bytes([b]) for b in word.encode("utf-8")]
                     merged_bytes = self._apply_bpe_fast(word_bytes)
