@@ -429,7 +429,7 @@ def train(
         # --- 定期验证 ---
         if val_dataset is not None and it % eval_interval == 0:
             model.eval()
-            with torch.no_grad():
+            with torch.no_grad(), amp_ctx:
                 val_losses = []
                 for _ in range(10):
                     vx, vy = get_batch(val_dataset, batch_size, context_length, device)
